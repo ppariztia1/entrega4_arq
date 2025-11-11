@@ -1,7 +1,3 @@
-# compiler_asua.py
-# Compilador parcial ASUA: solo +, -, paréntesis
-# Genera el bloque CODE que se pega en el ASUA Emulator
-
 import re
 
 def tokenize(expr):
