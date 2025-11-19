@@ -1,5 +1,5 @@
 import re
-
+DECLARED = {"a","b","c","d","e","f","g","result","error","zero"}
 IMMEDIATE_ZERO = True   # usar MOV A,0 en vez de MOV A,(zero)
 
 # ================================================
@@ -17,72 +17,77 @@ TOKEN_SPEC = [
     ("SKIP",   r"[ \t]+"),
 ]
 
-MASTER_RE = re.compile("|".join(f"(?P<{name}>{regex})" for name,regex in TOKEN_SPEC))
+TOK_REGEX = "|".join(f"(?P<{name}>{regex})" for name,regex in TOKEN_SPEC)
+MASTER_RE = re.compile(TOK_REGEX)
 
 class Token:
-    def __init__(self,typ,val):
-        self.type=typ
-        self.val=val
+    def _init_(self, typ, val):
+        self.type = typ
+        self.val = val
 
 def lex(s):
-    return [Token(m.lastgroup, m.group(m.lastgroup))
-            for m in MASTER_RE.finditer(s)
-            if m.lastgroup!="SKIP"]
-
+    tokens = []
+    for m in MASTER_RE.finditer(s):
+        typ = m.lastgroup
+        if typ != "SKIP":
+            tokens.append(Token(typ, m.group(typ)))
+    return tokens
 
 # ================================================
 #                   PARSER
 # ================================================
 
 class Parser:
-    def __init__(self,tokens):
-        self.tokens=tokens
-        self.pos=0
+    def _init_(self, tokens):
+        self.tokens = tokens
+        self.pos = 0
 
     def cur(self):
-        return self.tokens[self.pos] if self.pos<len(self.tokens) else Token("EOF","")
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else Token("EOF","")
 
-    def eat(self,typ=None,val=None):
-        tok=self.cur()
-        if typ and tok.type!=typ:
-            raise ValueError(f"Esperaba {typ}, llegó {tok}")
-        if val and tok.val!=val:
+    def eat(self, ttype=None, val=None):
+        tok = self.cur()
+        if ttype and tok.type != ttype:
+            raise ValueError(f"Esperaba tipo {ttype}, llegó {tok}")
+        if val and tok.val != val:
             raise ValueError(f"Esperaba {val}, llegó {tok.val}")
-        self.pos+=1
+        self.pos += 1
         return tok
 
     def parse_assignment(self):
-        left=self.eat("ID").val
+        left = self.eat("ID").val
         self.eat("EQ")
-        expr=self.parse_expr()
-        return left,expr
+        expr = self.parse_expr()
+        return left, expr
 
     def parse_expr(self):
-        node=self.parse_term()
+        node = self.parse_term()
         while self.cur().type=="OP" and self.cur().val in ("+","-"):
-            op=self.eat("OP").val
-            node=("binop",op,node,self.parse_term())
+            op = self.eat("OP").val
+            right = self.parse_term()
+            node = ("binop",op,node,right)
         return node
 
     def parse_term(self):
-        node=self.parse_factor()
+        node = self.parse_factor()
         while self.cur().type=="OP" and self.cur().val in ("*","/","%"):
-            op=self.eat("OP").val
-            node=("binop",op,node,self.parse_factor())
+            op = self.eat("OP").val
+            right = self.parse_factor()
+            node = ("binop",op,node,right)
         return node
 
     def parse_factor(self):
-        tok=self.cur()
+        tok = self.cur()
 
-        # -x
+        # unary -
         if tok.type=="OP" and tok.val=="-":
             self.eat("OP")
             return ("neg", self.parse_factor())
 
+        # variable or function
         if tok.type=="ID":
-            name=self.eat("ID").val
-            # function?
-            if self.cur().type=="LPAREN":
+            name = self.eat("ID").val
+            if self.cur().type == "LPAREN":
                 self.eat("LPAREN")
                 args=[]
                 if name.lower() in ("max","min"):
@@ -92,32 +97,33 @@ class Parser:
                 elif name.lower()=="abs":
                     args.append(self.parse_expr())
                 else:
-                    raise ValueError(f"Función no soportada: {name}")
+                    raise ValueError(f"Función desconocida {name}")
                 self.eat("RPAREN")
                 return ("func",name.lower(),args)
             return ("var",name)
 
+        # parenthesis
         if tok.type=="LPAREN":
             self.eat("LPAREN")
-            expr=self.parse_expr()
+            node = self.parse_expr()
             self.eat("RPAREN")
-            return expr
+            return node
 
+        # constant 0
         if tok.type=="NUMBER":
-            num=int(self.eat("NUMBER").val)
+            num = int(self.eat("NUMBER").val)
             if num!=0:
                 raise ValueError("Solo se acepta constante 0")
             return ("const0",)
 
-        raise ValueError(f"Token inesperado: {tok}")
-
+        raise ValueError(f"Token inesperado {tok}")
 
 # ================================================
-#             CODE GENERATOR (ASUA)
+#        CODE GENERATOR COMPATIBLE ASUA
 # ================================================
 
 class CodeGen:
-    def __init__(self):
+    def _init_(self):
         self.code=[]
         self.reads=0
         self.writes=0
@@ -125,61 +131,74 @@ class CodeGen:
         self.label_counter=0
         self.error_label=self.new_label()
         self.end_label=self.new_label()
+        self.used_vars = set()
+        self.temps = set()
 
-    def emit(self,line): self.code.append(line)
-    def mem_read(self): self.reads+=1
-    def mem_write(self): self.writes+=1
+
+    def emit(self,line):
+        self.code.append(line)
+
+    def mem_read(self):
+        self.reads+=1
+    def mem_write(self):
+        self.writes+=1
 
     def new_temp(self):
-        self.temp_counter+=1
-        return f"t{self.temp_counter}"
+        self.temp_counter += 1
+        name = f"t{self.temp_counter}"
+        self.temps.add(name)
+        return name
+
+
 
     def new_label(self):
         self.label_counter+=1
         return f"L{self.label_counter}"
 
-    # ------------------------------
-    # LOAD / STORE
-    # ------------------------------
+    # ---------------------------
+    # helpers A/B/memory
+    # ---------------------------
 
     def loadA(self,var):
-        self.emit(f"MOV A,({var})"); self.mem_read()
+        self.emit(f"MOV A,({var})")
+        self.mem_read()
 
     def loadB(self,var):
-        self.emit(f"MOV B,({var})"); self.mem_read()
+        self.emit(f"MOV B,({var})")
+        self.mem_read()
 
-    def moveA_imm(self,val):
+    def movA_immediate(self,val):
         self.emit(f"MOV A,{val}")
 
-    def moveB_imm(self,val):
-        self.emit(f"MOV B,{val}")
-
     def storeA(self,var):
-        self.emit(f"MOV ({var}),A"); self.mem_write()
+        self.emit(f"MOV ({var}),A")
+        self.mem_write()
 
     def store_zero(self,var):
         if IMMEDIATE_ZERO:
-            self.moveA_imm(0)
+            self.emit("MOV A,0")
         else:
             self.emit("MOV A,(zero)"); self.mem_read()
         self.storeA(var)
 
-    # -----------------------------------
-    # GENERATE
-    # -----------------------------------
-
+    # ---------------------------
+    # GENERATION
+    # ---------------------------
     def gen(self,node):
-        k=node[0]
+        kind=node[0]
 
-        if k=="var":
-            return node[1]
+        if kind == "var":
+            name = node[1]
+            self.used_vars.add(name)
+            return name
 
-        if k=="const0":
+
+        if kind=="const0":
             t=self.new_temp()
             self.store_zero(t)
             return t
 
-        if k=="neg":
+        if kind=="neg":
             loc=self.gen(node[1])
             t=self.new_temp()
             self.store_zero(t)
@@ -189,47 +208,55 @@ class CodeGen:
             self.storeA(t)
             return t
 
-        if k=="binop":
+        if kind=="binop":
             op,L,R=node[1],node[2],node[3]
-            l=self.gen(L)
-            r=self.gen(R)
-
+            left=self.gen(L)
+            right=self.gen(R)
             if op in ("+","-"):
                 t=self.new_temp()
-                self.loadA(l)
-                self.loadB(r)
+                self.loadA(left)
+                self.loadB(right)
                 self.emit("ADD A,B" if op=="+" else "SUB A,B")
                 self.storeA(t)
                 return t
-
             if op=="*":
-                return self.gen_mul(l,r)
+                return self.gen_mul(left,right)
             if op=="/":
-                return self.gen_div(l,r)
+                return self.gen_div(left,right)
             if op=="%":
-                return self.gen_mod(l,r)
+                return self.gen_mod(left,right)
 
-        if k=="func":
-            name=node[1]
+        if kind=="func":
+            fname=node[1]
             args=node[2]
-            if name=="max": return self.gen_max(args[0],args[1])
-            if name=="min": return self.gen_min(args[0],args[1])
-            if name=="abs": return self.gen_abs(args[0])
+            if fname=="max":
+                return self.gen_max(args[0],args[1])
+            if fname=="min":
+                return self.gen_min(args[0],args[1])
+            if fname=="abs":
+                return self.gen_abs(args[0])
 
-        raise ValueError(f"Nodo no manejado: {node}")
+        raise ValueError(f"Nodo no manejado {node}")
 
     # ================================================
-    #                 MULTIPLICACIÓN
+    #     MULTIPLICACIÓN: a * b (simple)
     # ================================================
-    def gen_mul(self,l,r):
-        m=self.new_temp()
-        n=self.new_temp()
+    def gen_mul(self,L,R):
+        m=self.new_temp()   # multiplicando
+        n=self.new_temp()   # multiplicador
         acc=self.new_temp()
         res=self.new_temp()
 
-        self.loadA(l); self.storeA(m)   # m = left
-        self.loadA(r); self.storeA(n)   # n = right
-        self.store_zero(acc)            # acc = 0
+        # m = L
+        self.loadA(L)
+        self.storeA(m)
+
+        # n = R
+        self.loadA(R)
+        self.storeA(n)
+
+        # acc=0
+        self.store_zero(acc)
 
         Lstart=self.new_label()
         Lend=self.new_label()
@@ -247,7 +274,7 @@ class CodeGen:
 
         # n = n - 1
         self.loadA(n)
-        self.moveB_imm(1)
+        self.movA_immediate(1)
         self.emit("SUB A,B")
         self.storeA(n)
 
@@ -259,22 +286,26 @@ class CodeGen:
         return res
 
     # ================================================
-    #               DIVISIÓN  a / b
+    #    DIVISIÓN: a / b (simples, positivos)
     # ================================================
-    def gen_div(self,l,r):
+    def gen_div(self,L,R):
         dividend=self.new_temp()
         divisor=self.new_temp()
         q=self.new_temp()
         res=self.new_temp()
 
-        self.loadA(l); self.storeA(dividend)
-        self.loadA(r); self.storeA(divisor)
+        self.loadA(L)
+        self.storeA(dividend)
 
-        # divisor == 0 → ERROR
+        self.loadA(R)
+        self.storeA(divisor)
+
+        # divisor == 0 -> error
         self.loadA(divisor)
         self.emit("CMP A,0")
         self.emit(f"JEQ {self.error_label}")
 
+        # q=0
         self.store_zero(q)
 
         Lstart=self.new_label()
@@ -282,6 +313,7 @@ class CodeGen:
         Lend=self.new_label()
 
         self.emit(f"{Lstart}:")
+        # if divisor <= dividend
         self.loadA(divisor)
         self.loadB(dividend)
         self.emit("CMP A,B")
@@ -289,13 +321,15 @@ class CodeGen:
         self.emit(f"JMP {Lend}")
 
         self.emit(f"{Lbody}:")
+        # dividend -= divisor
         self.loadA(dividend)
         self.loadB(divisor)
         self.emit("SUB A,B")
         self.storeA(dividend)
 
+        # q += 1
         self.loadA(q)
-        self.moveB_imm(1)
+        self.movA_immediate(1)
         self.emit("ADD A,B")
         self.storeA(q)
 
@@ -307,15 +341,17 @@ class CodeGen:
         return res
 
     # ================================================
-    #               MODULO  a % b
+    #     MODULO: a % b
     # ================================================
-    def gen_mod(self,l,r):
+    def gen_mod(self,L,R):
         dividend=self.new_temp()
         divisor=self.new_temp()
         res=self.new_temp()
 
-        self.loadA(l); self.storeA(dividend)
-        self.loadA(r); self.storeA(divisor)
+        self.loadA(L)
+        self.storeA(dividend)
+        self.loadA(R)
+        self.storeA(divisor)
 
         self.loadA(divisor)
         self.emit("CMP A,0")
@@ -345,7 +381,7 @@ class CodeGen:
         return res
 
     # ================================================
-    #                  MAX
+    #     max(x,y)
     # ================================================
     def gen_max(self,X,Y):
         a=self.gen(X)
@@ -363,7 +399,7 @@ class CodeGen:
         return t
 
     # ================================================
-    #                  MIN
+    #     min(x,y)
     # ================================================
     def gen_min(self,X,Y):
         a=self.gen(X)
@@ -381,7 +417,7 @@ class CodeGen:
         return t
 
     # ================================================
-    #                  ABS
+    #     abs(x)
     # ================================================
     def gen_abs(self,X):
         x=self.gen(X)
@@ -392,17 +428,20 @@ class CodeGen:
         self.emit("CMP A,0")
         self.emit(f"JGE {Lok}")
 
+        # negativo -> A = -A
         self.emit("MOV B,A")
-        self.moveA_imm(0)
+        if IMMEDIATE_ZERO:
+            self.emit("MOV A,0")
+        else:
+            self.emit("MOV A,(zero)"); self.mem_read()
         self.emit("SUB A,B")
 
         self.emit(f"{Lok}:")
         self.storeA(t)
         return t
 
-
 # ================================================
-#            FUNCIÓN PRINCIPAL
+#  FUNCIÓN PRINCIPAL
 # ================================================
 
 def compile_to_asua(expr):
@@ -411,24 +450,32 @@ def compile_to_asua(expr):
     lhs,ast=p.parse_assignment()
 
     if lhs!="result":
-        raise ValueError("Debe ser de la forma: result = ...")
+        raise ValueError("La asignación debe ser: result = ...")
 
     gen=CodeGen()
     final_loc=gen.gen(ast)
 
-    # resultado normal
+    # guardar resultado normal
     gen.loadA(final_loc)
-    gen.emit("MOV (result),A"); gen.mem_write()
+    gen.emit("MOV (result),A")
+    gen.mem_write()
+
     gen.emit(f"JMP {gen.end_label}")
 
-    # rutina ERROR
+    # rutina error
     gen.emit(f"{gen.error_label}:")
-    gen.moveA_imm(1)
-    gen.emit("MOV (error),A"); gen.mem_write()
-    gen.moveA_imm(0)
-    gen.emit("MOV (result),A"); gen.mem_write()
+    gen.movA_immediate(1)
+    gen.emit("MOV (error),A")
+    gen.mem_write()
+    if IMMEDIATE_ZERO:
+        gen.movA_immediate(0)
+    else:
+        gen.loadA("zero")
+    gen.emit("MOV (result),A")
+    gen.mem_write()
     gen.emit(f"JMP {gen.end_label}")
 
+    # fin
     gen.emit(f"{gen.end_label}:")
     gen.emit("HLT")
 
@@ -438,12 +485,30 @@ def compile_to_asua(expr):
         "writes":gen.writes,
         "mem_accesses":gen.reads+gen.writes
     }
+    # ---------------------------------------------------------
+    # VALIDACIÓN DE VARIABLES NO DECLARADAS
+    # ---------------------------------------------------------
+
+
+
+    # ---------------------------------------------------------
+    # VALIDACIÓN DE VARIABLES USADAS VS DECLARADAS
+    # ---------------------------------------------------------
+    
+    valid = DECLARED.union(gen.temps)
+    
+    unknown = [v for v in gen.used_vars if v not in valid]
+    
+    if unknown:
+        raise ValueError(f"Variables no declaradas: {', '.join(unknown)}")
+
     return gen.code,stats
 
 
-if __name__=="__main__":
+if _name=="main_":
     expr=input("Expr: ")
     code,stats=compile_to_asua(expr)
+    
     print("\nCODE:")
     for line in code:
         print(line)
