@@ -1,0 +1,55 @@
+# Entonces quedaría:
+fpga_botones_leds/
+├── apio.ini
+├── src/
+│   ├── main.v
+└── constraints/
+    └── pinout.pcf
+
+# apio.ini:
+[env:default]
+board = icestick
+top-module = main
+
+# src/main.v:
+module main (
+    input  wire [3:0] btn,  // 4 botones externos
+    output wire [3:0] led   // 4 LEDs en la placa
+);
+    // Si los botones usan pull-up (activos bajos),
+    // invertimos la lógica: botón presionado = 0 → LED encendido.
+    assign led = ~btn;
+endmodule
+
+# Constraints/pinout.pcf:
+#===================================================
+# Pinout para iCEstick
+#===================================================
+
+# --- LEDs onboard ---
+set_io led[0] 99
+set_io led[1] 98
+set_io led[2] 97
+set_io led[3] 96
+# (El LED verde está en el pin 95, si lo querés usar extra)
+
+# --- Botones externos (ejemplo) ---
+# Los botones van conectados a pines del header P1 o P2.
+# Sustituí los números <PINX> por los que uses realmente
+# según tu esquema de cableado. 
+# Activa pull-up porque los pulsadores irán a GND.
+set_io -pullup yes btn[0] 78
+set_io -pullup yes btn[1] 79
+set_io -pullup yes btn[2] 80
+set_io -pullup yes btn[3] 81
+
+# (No uses el pin 21: es el clock de 12 MHz del oscilador)
+
+
+
+# Desde cd ~/fpga_botones_leds:
+apio init --board icestick
+apio build -> [SUCCESS] si todo sale bien
+apio upload # mand a la fpga
+
+
